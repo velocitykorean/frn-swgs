@@ -68,11 +68,12 @@ def save_published_entry(video_name, audio_name, image_name, yt_video_id=None, f
             "image_file": os.path.basename(image_name) if image_name else "",
             "youtube_id": yt_video_id,
             "youtube_url": f"https://youtu.be/{yt_video_id}" if yt_video_id else "LOCAL_RENDER",
-            "facebook_id": fb_video_id,
-            "facebook_url": f"https://www.facebook.com/{fb_page_id}/videos/{fb_video_id}" if fb_video_id else None,
             "title": title,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
+        if fb_video_id:
+            entry["facebook_id"] = fb_video_id
+            entry["facebook_url"] = f"https://www.facebook.com/{fb_page_id}/videos/{fb_video_id}"
         history.append(entry)
 
     with open(PUBLISHED_LOG, 'w', encoding='utf-8') as f:
@@ -215,21 +216,25 @@ def run_pipeline(duration=3600, dry_run=False):
         except Exception as e:
             print(f"[YOUTUBE NOTE] YouTube API upload skipped or encountered error ({e}). Video is ready in output_videos/")
 
-    # Facebook Page Upload (CRITICAL - Primary Target)
+    # Facebook Page Upload (skipped when credentials are not configured)
     fb_video_id = None
-    try:
-        from publish_facebook import upload_to_facebook
-        print(f"\n[facebook] Uploading to Facebook Page Fern Swings...")
-        fb_res = upload_to_facebook(final_video_path, title, desc)
-        fb_video_id = fb_res.get("id") if fb_res else None
-        if not fb_video_id:
-            raise RuntimeError("Facebook API returned empty or invalid video ID.")
-        print(f"🎉 SUCCESS! Published to Facebook: {fb_video_id}")
-    except Exception as e_fb:
-        print(f"\n[CRITICAL ERROR] Facebook upload failed: {e_fb}")
-        # Save record of YouTube upload so we don't lose that progress
-        save_published_entry(vid_path, aud_path, img_path, yt_video_id=yt_video_id, fb_video_id=None, title=title)
-        raise RuntimeError(f"Facebook publishing failed: {e_fb}. Failing pipeline because Facebook publishing is critical.")
+    fb_configured = bool((os.getenv("FB_PAGE_ID") or os.getenv("FACEBOOK_PAGE_ID")) and (os.getenv("FB_PAGE_ACCESS_TOKEN") or os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN")))
+    if not fb_configured:
+        print("\n[facebook] Facebook credentials not configured. Skipping Facebook upload (YouTube will still publish).")
+    else:
+        try:
+            from publish_facebook import upload_to_facebook
+            print(f"\n[facebook] Uploading to Facebook Page Fern Swings...")
+            fb_res = upload_to_facebook(final_video_path, title, desc)
+            fb_video_id = fb_res.get("id") if fb_res else None
+            if not fb_video_id:
+                raise RuntimeError("Facebook API returned empty or invalid video ID.")
+            print(f"🎉 SUCCESS! Published to Facebook: {fb_video_id}")
+        except Exception as e_fb:
+            print(f"\n[CRITICAL ERROR] Facebook upload failed: {e_fb}")
+            # Save record of YouTube upload so we don't lose that progress
+            save_published_entry(vid_path, aud_path, img_path, yt_video_id=yt_video_id, fb_video_id=None, title=title)
+            raise RuntimeError(f"Facebook publishing failed: {e_fb}. Failing pipeline because Facebook publishing is critical.")
 
     save_published_entry(vid_path, aud_path, img_path, yt_video_id=yt_video_id, fb_video_id=fb_video_id, title=title)
     return True
