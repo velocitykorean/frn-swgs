@@ -1,0 +1,248 @@
+"""
+Fern Swings YouTube Automation Pipeline (FernSwings - Little Wings, Hidden Wonders)
+Full End-to-End Orchestrator:
+1. Fetches Video, Audio, Image triplets from Google Drive (or local folders)
+2. Watermark elimination
+3. Minimalist aesthetic thumbnail creation
+4. 1-Hour HD Video rendering (NVENC)
+5. YouTube publish & metadata tagging
+"""
+
+import os
+import sys
+import json
+import glob
+import random
+import time
+from datetime import datetime
+from dotenv import load_dotenv
+
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+load_dotenv()
+
+from google_drive_fetch import fetch_assets_triplet
+from thumbnail_generator import create_relaxation_thumbnail, RELAXATION_HOOKS
+from video_generator import build_calm_relaxation_video
+
+PUBLISHED_LOG = "published_videos.json"
+ALLOW_REPOST = os.getenv("ALLOW_REPOST", "true").lower() == "true"
+
+def get_published_history():
+    if os.path.exists(PUBLISHED_LOG):
+        try:
+            with open(PUBLISHED_LOG, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_published_entry(video_name, audio_name, image_name, yt_video_id=None, fb_video_id=None, title=""):
+    history = get_published_history()
+    fb_page_id = os.getenv("FB_PAGE_ID") or os.getenv("FACEBOOK_PAGE_ID") or "1278026508735006"
+
+    aud_base = os.path.basename(audio_name).strip().lower()
+    updated = False
+
+    # Look for existing entry for this audio track to update missing fields (e.g. pending Facebook)
+    for entry in history:
+        e_aud = (entry.get("audio_file") or entry.get("audio_name") or entry.get("song_name") or "").strip().lower()
+        if e_aud == aud_base:
+            if yt_video_id and (not entry.get("youtube_id") or entry.get("youtube_id") == "LOCAL_RENDER"):
+                entry["youtube_id"] = yt_video_id
+                entry["youtube_url"] = f"https://youtu.be/{yt_video_id}"
+            if fb_video_id:
+                entry["facebook_id"] = fb_video_id
+                entry["facebook_url"] = f"https://www.facebook.com/{fb_page_id}/videos/{fb_video_id}"
+            if title:
+                entry["title"] = title
+            entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
+            updated = True
+            break
+
+    if not updated:
+        entry = {
+            "video_file": os.path.basename(video_name),
+            "audio_file": os.path.basename(audio_name),
+            "image_file": os.path.basename(image_name) if image_name else "",
+            "youtube_id": yt_video_id,
+            "youtube_url": f"https://youtu.be/{yt_video_id}" if yt_video_id else "LOCAL_RENDER",
+            "facebook_id": fb_video_id,
+            "facebook_url": f"https://www.facebook.com/{fb_page_id}/videos/{fb_video_id}" if fb_video_id else None,
+            "title": title,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        history.append(entry)
+
+    with open(PUBLISHED_LOG, 'w', encoding='utf-8') as f:
+        json.dump(history, f, indent=2, ensure_ascii=False)
+    print(f"[LOG] Saved publication record to {PUBLISHED_LOG}")
+
+def generate_youtube_metadata(audio_path, video_path):
+    """Generate SEO-optimized hummingbird nesting title, description, and tags (FernSwings)."""
+    base_name = os.path.splitext(os.path.basename(audio_path))[0].replace("_", " ").title()
+    vid_name = os.path.splitext(os.path.basename(video_path))[0].replace("_", " ").title()
+
+    titles_templates = [
+        f"Beautiful Hummingbirds Nesting | {base_name} Peaceful Nature & Relaxation (1 Hour)",
+        f"Tiny Hummingbird Nests & Baby Birds | {base_name} Hidden Wonders (1 Hour)",
+        f"Beautiful Hummingbird Nest Moments | Calm Nature, Baby Birds & Forest Peace",
+        f"Hidden Hummingbird Nests Up Close | {base_name} Relaxing Nature & Birdlife"
+    ]
+
+    title = random.choice(titles_templates)
+
+    desc = (
+        f"Welcome to FernSwings - Little Wings, Hidden Wonders.\n\n"
+        f"Step into the beautiful world of nature, where tiny hummingbirds, hidden nests, "
+        f"and extraordinary wildlife moments reveal the magic of life.\n\n"
+        f"In this video, enjoy beautiful hummingbird nesting moments with '{base_name}' "
+        f"and '{vid_name}' - delicate feathers, intricate nests, baby birds, and breathtaking "
+        f"close-ups of wildlife, set in peaceful forests and enchanting nature scenes.\n\n"
+        f"✨ What you'll discover here:\n"
+        f" Beautiful birds and hummingbirds\n"
+        f" Amazing nests and precious moments of birdlife\n"
+        f" Peaceful forests and enchanting nature scenes\n"
+        f" Fascinating wildlife and animal behavior\n"
+        f" Heartwarming, relaxing, and visually stunning nature videos\n\n"
+        f"Our mission is to bring you closer to nature, one magical moment at a time.\n\n"
+        f"Subscribe to FernSwings and discover the little wonders that make our world extraordinary.\n\n"
+        f" FernSwings - Little Wings. Hidden Wonders.\n\n"
+        f"#FernSwings #Wildlife #Birds #Nature #Hummingbirds"
+    )
+
+    tags = [
+        "hummingbird", "hummingbirds", "hummingbird nest", "bird nest",
+        "baby birds", "beautiful birds", "birdlife", "nature video",
+        "wildlife", "forest", "relaxing nature", "peaceful nature",
+        "FernSwings",
+    ]
+
+    return title, desc, tags
+
+def run_pipeline(duration=3600, dry_run=False):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    output_thumb_dir = os.path.join(script_dir, "output_thumbnails")
+    output_video_dir = os.path.join(script_dir, "output_videos")
+
+    os.makedirs(output_thumb_dir, exist_ok=True)
+    os.makedirs(output_video_dir, exist_ok=True)
+
+    print("\n" + "="*60)
+    print("      FERN SWINGS BOT - AUTOMATED PIPELINE")
+    print("="*60)
+
+    # Step 1: Fetch triplet
+    vid_path, aud_path, img_path, is_repost = fetch_assets_triplet(allow_repost=ALLOW_REPOST)
+    if not vid_path or not aud_path:
+        print("[ERROR] Could not fetch required video and audio assets.")
+        return False
+
+    print(f"\n[STEP 1] Assets Selected:")
+    print(f"  • Video: {os.path.basename(vid_path)}")
+    print(f"  • Audio: {os.path.basename(aud_path)}")
+    print(f"  • Image: {os.path.basename(img_path) if img_path else 'None (extracting from video)'}")
+
+    # If no thumbnail image, extract frame 2s from video
+    if not img_path or not os.path.exists(img_path):
+        img_path = os.path.join(script_dir, "input_images", f"frame_{os.path.splitext(os.path.basename(vid_path))[0]}.jpg")
+        import subprocess
+        subprocess.run(['ffmpeg', '-y', '-ss', '00:00:02', '-i', vid_path, '-frames:v', '1', img_path], check=True)
+
+    # Step 2: Generate Thumbnail
+    safe_name = "".join(c for c in os.path.splitext(os.path.basename(aud_path))[0] if c.isalnum() or c in (' ', '_', '-')).strip()
+    thumb_output = os.path.join(output_thumb_dir, f"Thumb_{safe_name}.jpg")
+
+    hook = random.choice(RELAXATION_HOOKS)
+    print(f"\n[STEP 2] Creating Thumbnail with Hook: '{hook['main']}'...")
+    create_relaxation_thumbnail(img_path, thumb_output, main_text=hook['main'], sub_text=hook['sub'])
+
+    # Step 3: Render Full Video
+    dur_label = f"{duration//60}min" if duration >= 60 else f"{duration}s"
+    final_video_path = os.path.join(output_video_dir, f"FernSwings_{safe_name}_{dur_label}.mp4")
+
+    print(f"\n[STEP 3] Rendering {dur_label} Looping Video...")
+    success = build_calm_relaxation_video(
+        input_video=vid_path,
+        input_audio=aud_path,
+        output_path=final_video_path,
+        duration_seconds=duration,
+        remove_watermark=True
+    )
+
+    if not success:
+        print("[ERROR] Video generation failed.")
+        return False
+
+    # Step 4: Metadata & Publishing
+    title, desc, tags = generate_youtube_metadata(aud_path, vid_path)
+    print(f"\n[STEP 4] Generated YouTube Metadata:")
+    print(f"  • Title: {title}")
+    print(f"  • Tags: {', '.join(tags[:6])}...")
+
+    if dry_run:
+        print(f"\n[DRY RUN] Finished. Video saved at: {final_video_path}")
+        print(f"[DRY RUN] Thumbnail saved at: {thumb_output}")
+        save_published_entry(vid_path, aud_path, img_path, yt_video_id=None, fb_video_id=None, title=title)
+        return True
+
+    # Step 5: Upload to Platforms (YouTube & Facebook)
+    aud_base = os.path.basename(aud_path).strip().lower()
+    existing_yt_id = None
+    for entry in get_published_history():
+        if (entry.get("audio_file") or entry.get("audio_name") or entry.get("song_name") or "").strip().lower() == aud_base:
+            yt_id = entry.get("youtube_id")
+            if yt_id and yt_id != "LOCAL_RENDER":
+                existing_yt_id = yt_id
+                break
+
+    upload_yt = os.getenv("UPLOAD_YOUTUBE", "true").lower() not in ("false", "0", "no")
+    yt_video_id = existing_yt_id
+
+    if existing_yt_id:
+        print(f"\n[youtube] Track '{os.path.basename(aud_path)}' was already published to YouTube ({existing_yt_id}). Skipping YouTube upload.")
+    elif not upload_yt:
+        print("\n[youtube] Alternate-day schedule: Skipping YouTube upload today (Facebook will still publish).")
+    else:
+        try:
+            from publish_youtube import upload_to_youtube, set_video_thumbnail
+            print(f"\n[STEP 5] Uploading to YouTube...")
+            yt_video_id = upload_to_youtube(final_video_path, title, desc, tags=tags)
+            if yt_video_id:
+                set_video_thumbnail(yt_video_id, thumb_output)
+                print(f"🎉 SUCCESS! Published to YouTube: https://youtu.be/{yt_video_id}")
+        except Exception as e:
+            print(f"[YOUTUBE NOTE] YouTube API upload skipped or encountered error ({e}). Video is ready in output_videos/")
+
+    # Facebook Page Upload (CRITICAL - Primary Target)
+    fb_video_id = None
+    try:
+        from publish_facebook import upload_to_facebook
+        print(f"\n[facebook] Uploading to Facebook Page Fern Swings...")
+        fb_res = upload_to_facebook(final_video_path, title, desc)
+        fb_video_id = fb_res.get("id") if fb_res else None
+        if not fb_video_id:
+            raise RuntimeError("Facebook API returned empty or invalid video ID.")
+        print(f"🎉 SUCCESS! Published to Facebook: {fb_video_id}")
+    except Exception as e_fb:
+        print(f"\n[CRITICAL ERROR] Facebook upload failed: {e_fb}")
+        # Save record of YouTube upload so we don't lose that progress
+        save_published_entry(vid_path, aud_path, img_path, yt_video_id=yt_video_id, fb_video_id=None, title=title)
+        raise RuntimeError(f"Facebook publishing failed: {e_fb}. Failing pipeline because Facebook publishing is critical.")
+
+    save_published_entry(vid_path, aud_path, img_path, yt_video_id=yt_video_id, fb_video_id=fb_video_id, title=title)
+    return True
+
+if __name__ == "__main__":
+    is_dry = "--dry-run" in sys.argv
+    dur = 3600
+    for idx, arg in enumerate(sys.argv):
+        if arg == "--duration" and idx + 1 < len(sys.argv) and sys.argv[idx + 1].strip():
+            try:
+                dur = int(sys.argv[idx + 1].strip())
+            except ValueError:
+                dur = 3600
+    ok = run_pipeline(duration=dur, dry_run=is_dry)
+    if not ok:
+        sys.exit(1)
